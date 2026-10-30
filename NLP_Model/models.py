@@ -20,7 +20,7 @@ class SkillDataset(Dataset):
     def __getitem__(self, idx):
         if self.labels is not None:
             return self.features[idx], self.labels[idx]
-        return self.features[idx], 0  # Dummy label for prediction
+        return self.features[idx], 0
 
 class NeuralClassifier(nn.Module):
     def __init__(self, input_dim, num_classes, hidden_dims=[512, 256], dropout=0.3):

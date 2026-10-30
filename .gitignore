@@ -17,3 +17,17 @@ embeddings_cache/
 
 # python Cache
 __pycache__
+
+# Django
+web_app/db.sqlite3
+web_app/staticfiles/
+web_app/media/
+web_app/*/migrations/
+*.pot
+
+# Environment
+.env
+.env.local
+
+# Markdown files
+*.md
