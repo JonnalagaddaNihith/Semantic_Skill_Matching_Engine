@@ -1,0 +1,12 @@
+# venv
+.semantic_engine
+
+# vscode set-up
+.vscode
+
+# NLP model
+models/
+*.joblib
+
+# Synthetic data
+DataSet/
