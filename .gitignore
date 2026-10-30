@@ -5,8 +5,15 @@
 .vscode
 
 # NLP model
-models/
+artifacts/
 *.joblib
 
 # Synthetic data
 DataSet/
+
+# Cache memory
+embeddings_cache/
+*.npz
+
+# python Cache
+__pycache__

@@ -6,8 +6,12 @@ import random
 from collections import Counter, defaultdict
 from pathlib import Path
 
+import numpy as np
+from sentence_transformers import SentenceTransformer
+
 SEED = 42
-VERSION = "1.0.0"
+VERSION = "2.0.0"
+ENCODER_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 
 DOMAINS = {
     "Programming": [
@@ -68,11 +72,10 @@ DOMAINS = {
 
 LABEL_SCORES = {
     "UNRELATED": 0,
-    "PREREQUISITE": 1,
-    "RELATED": 2,
-    "PARTIAL_MATCH": 3,
-    "PARAPHRASE": 4,
-    "EXACT": 4,
+    "RELATED": 1,
+    "PARTIAL_MATCH": 2,
+    "PARAPHRASE": 3,
+    "EXACT": 3,
 }
 
 SKILL_ALIASES = {
@@ -397,7 +400,20 @@ def skill_text(skill, rng, *, allow_bare=True):
     return rng.choice(options)
 
 
-def make_pairs(rng, competencies, entities, target_count):
+def compute_semantic_similarity(text_a, text_b, encoder, cache):
+    """Compute semantic similarity between two texts using cached embeddings."""
+    # Check cache
+    if text_a not in cache:
+        cache[text_a] = encoder.encode(text_a, normalize_embeddings=True)
+    if text_b not in cache:
+        cache[text_b] = encoder.encode(text_b, normalize_embeddings=True)
+
+    # Cosine similarity
+    sim = np.dot(cache[text_a], cache[text_b])
+    return sim
+
+
+def make_pairs(rng, competencies, entities, target_count, encoder=None):
     skills_by_domain = defaultdict(list)
     for c in competencies:
         skills_by_domain[c["domain"]].append(c["competency_name"])
@@ -420,9 +436,10 @@ def make_pairs(rng, competencies, entities, target_count):
 
     pairs = []
     seen = set()
+    embedding_cache = {}
 
-    target_labels = ["EXACT", "PARAPHRASE", "PARTIAL_MATCH", "RELATED", "PREREQUISITE", "UNRELATED"]
-    label_weights = [0.15, 0.22, 0.22, 0.20, 0.06, 0.15]
+    target_labels = ["EXACT", "PARAPHRASE", "PARTIAL_MATCH", "RELATED", "UNRELATED"]
+    label_weights = [0.15, 0.22, 0.22, 0.26, 0.15]
 
     task_names = ["skill_competency", "learner_job", "gap_course", "relationship"]
     task_weights = [0.70, 0.18, 0.10, 0.02]
@@ -439,14 +456,15 @@ def make_pairs(rng, competencies, entities, target_count):
                 a = rng.choice(skills)
                 b = a
                 text_a, text_b = a, a
+                label = "EXACT"
             elif desired_label == "PARAPHRASE":
                 a = rng.choice(skills)
                 b = a
                 text_a = skill_text(a, rng, allow_bare=True)
                 text_b = skill_text(b, rng, allow_bare=False)
-                # Ensure texts are strictly non-identical for paraphrases
                 while text_a == text_b:
                     text_b = skill_text(b, rng, allow_bare=False)
+                label = "PARAPHRASE"
             elif desired_label == "PREREQUISITE":
                 domain = rng.choice(list(skills_by_domain.keys()))
                 d_skills = skills_by_domain[domain]
@@ -454,6 +472,13 @@ def make_pairs(rng, competencies, entities, target_count):
                     continue
                 a, b = rng.sample(d_skills, 2)
                 text_a, text_b = skill_text(a, rng), skill_text(b, rng)
+                # Use semantic similarity to validate prerequisite
+                if encoder:
+                    sim = compute_semantic_similarity(text_a, text_b, encoder, embedding_cache)
+                    # Prerequisites should have moderate similarity (0.3-0.6)
+                    if sim < 0.3 or sim > 0.6:
+                        continue
+                label = "PREREQUISITE"
             elif desired_label in {"PARTIAL_MATCH", "RELATED"}:
                 domain = rng.choice(list(skills_by_domain.keys()))
                 d_skills = skills_by_domain[domain]
@@ -461,16 +486,32 @@ def make_pairs(rng, competencies, entities, target_count):
                     continue
                 a, b = rng.sample(d_skills, 2)
                 text_a, text_b = skill_text(a, rng), skill_text(b, rng)
+                # Use semantic similarity to distinguish PARTIAL_MATCH vs RELATED
+                if encoder:
+                    sim = compute_semantic_similarity(text_a, text_b, encoder, embedding_cache)
+                    if sim > 0.6:
+                        label = "PARTIAL_MATCH"
+                    elif sim > 0.3:
+                        label = "RELATED"
+                    else:
+                        continue  # Too unrelated
+                else:
+                    label = desired_label
             else:  # UNRELATED
                 dom1, dom2 = rng.sample(list(skills_by_domain.keys()), 2)
                 a = rng.choice(skills_by_domain[dom1])
                 b = rng.choice(skills_by_domain[dom2])
                 text_a, text_b = skill_text(a, rng), skill_text(b, rng)
+                # Validate low similarity
+                if encoder:
+                    sim = compute_semantic_similarity(text_a, text_b, encoder, embedding_cache)
+                    if sim > 0.3:
+                        continue  # Too related
+                label = "UNRELATED"
 
             entity_a = competency_by_name[a]["competency_id"]
             entity_b = competency_by_name[b]["competency_id"]
             group = entity_a
-            label = desired_label
 
         elif task == "learner_job":
             learner = rng.choice(entities["learners"])
@@ -483,7 +524,7 @@ def make_pairs(rng, competencies, entities, target_count):
             text_b = f"Job requirements: {', '.join(sorted(required)[:4])}"
 
             if overlap:
-                label = "PARTIAL_MATCH" if desired_label in {"PARTIAL_MATCH", "UNRELATED"} else "PARAPHRASE"
+                label = "PARTIAL_MATCH"
             else:
                 label = "UNRELATED"
 
@@ -502,8 +543,6 @@ def make_pairs(rng, competencies, entities, target_count):
 
             if course_skill in owned:
                 label = "RELATED"
-            elif desired_label == "UNRELATED":
-                label = "UNRELATED"
             else:
                 label = "PARTIAL_MATCH"
 
@@ -608,6 +647,8 @@ def main():
                         help="Number of synthetic learner profiles.")
     parser.add_argument("--seed", type=int, default=SEED,
                         help="Random seed.")
+    parser.add_argument("--use-semantic-labels", action="store_true",
+                        help="Use semantic similarity for better label generation.")
     args = parser.parse_args()
 
     rng = random.Random(args.seed)
@@ -616,7 +657,15 @@ def main():
 
     competencies = make_catalog()
     entities = build_entities(rng, competencies, learner_count=args.learners)
-    pairs, fallback_count = make_pairs(rng, competencies, entities, args.pairs)
+
+    # Load encoder for semantic label generation
+    encoder = None
+    if args.use_semantic_labels:
+        print(f"Loading encoder: {ENCODER_NAME}")
+        encoder = SentenceTransformer(ENCODER_NAME)
+        print("Using semantic similarity for label generation")
+
+    pairs, fallback_count = make_pairs(rng, competencies, entities, args.pairs, encoder=encoder)
 
     write_csv(output_dir / "competencies.csv", competencies)
     for name, rows in entities.items():
